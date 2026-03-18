@@ -4,6 +4,7 @@ Shared infrastructure for agent implementations that need Node.js
 and/or npm packages installed in sandboxes.
 """
 
+import copy
 import json
 import lzma
 import os
@@ -12,6 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 from io import BytesIO
+from typing import Callable
 
 from inspect_ai.util import SandboxEnvironment, concurrency
 
@@ -210,6 +212,41 @@ def create_npm_bundle(
         f.write(bundle_data)
 
     return bundle_data
+
+
+def patch_npm_bundle_file(
+    bundle_data: bytes,
+    path: str,
+    transform: Callable[[str], str],
+) -> bytes:
+    """Patch a single text file inside an npm bundle tarball."""
+    src = BytesIO(bundle_data)
+    dst = BytesIO()
+    found = False
+
+    with tarfile.open(fileobj=src, mode="r:gz") as input_tar:
+        with tarfile.open(fileobj=dst, mode="w:gz") as output_tar:
+            for member in input_tar.getmembers():
+                extracted = input_tar.extractfile(member) if member.isfile() else None
+                if member.name != path:
+                    output_tar.addfile(member, extracted)
+                    continue
+
+                if extracted is None:
+                    raise RuntimeError(f"Expected file entry for npm bundle path: {path}")
+
+                text = extracted.read().decode("utf-8")
+                patched = transform(text)
+                patched_member = copy.copy(member)
+                patched_data = patched.encode("utf-8")
+                patched_member.size = len(patched_data)
+                output_tar.addfile(patched_member, BytesIO(patched_data))
+                found = True
+
+    if not found:
+        raise RuntimeError(f"Path not found in npm bundle: {path}")
+
+    return dst.getvalue()
 
 
 async def install_npm_bundle(

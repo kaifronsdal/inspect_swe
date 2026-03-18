@@ -12,6 +12,7 @@ from inspect_swe._util.node import (
     create_npm_bundle,
     ensure_node_available,
     install_npm_bundle,
+    patch_npm_bundle_file,
     resolve_npm_package_version,
 )
 from inspect_swe._util.sandbox import (
@@ -24,6 +25,32 @@ from inspect_swe._util.sandbox import (
 logger = logging.getLogger(__name__)
 
 _ACP_ADAPTER_PACKAGE = "@zed-industries/claude-agent-acp"
+_CLAUDE_AGENT_SDK_TIMEOUT_ENV_VAR = "CLAUDE_AGENT_SDK_TIMEOUT_MS"
+_CLAUDE_AGENT_SDK_BUNDLE_PATH = "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs"
+_CLAUDE_AGENT_SDK_DEFAULT_TIMEOUT_MS = 60000
+
+
+def _patch_claude_agent_sdk_timeout(bundle_data: bytes) -> bytes:
+    original = f"var QM={_CLAUDE_AGENT_SDK_DEFAULT_TIMEOUT_MS};"
+    replacement = (
+        "var QM=(()=>{"
+        f"let value=Number.parseInt(process.env.{_CLAUDE_AGENT_SDK_TIMEOUT_ENV_VAR}??\"\",10);"
+        f"return Number.isFinite(value)&&value>0?value:{_CLAUDE_AGENT_SDK_DEFAULT_TIMEOUT_MS}"
+        "})();"
+    )
+
+    def patch(text: str) -> str:
+        if _CLAUDE_AGENT_SDK_TIMEOUT_ENV_VAR in text:
+            return text
+        if original not in text:
+            raise RuntimeError("Unable to locate Claude SDK timeout constant in bundled sdk.mjs")
+        return text.replace(original, replacement, 1)
+
+    return patch_npm_bundle_file(
+        bundle_data=bundle_data,
+        path=_CLAUDE_AGENT_SDK_BUNDLE_PATH,
+        transform=patch,
+    )
 
 
 async def ensure_claude_code_acp_setup(
@@ -61,6 +88,7 @@ async def _ensure_acp_installed(
             platform=platform,
             cache_name="claude-agent-acp-bundles",
         )
+        bundle_data = _patch_claude_agent_sdk_timeout(bundle_data)
         return await install_npm_bundle(
             sandbox=sandbox,
             bundle_data=bundle_data,

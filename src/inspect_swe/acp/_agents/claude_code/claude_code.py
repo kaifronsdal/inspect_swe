@@ -16,9 +16,14 @@ from inspect_swe._util.path import join_path
 from inspect_swe.acp import ACPAgent
 from inspect_swe.acp.agent import ACPAgentParams
 
-from .agentbinary import ensure_claude_code_acp_setup
+from .agentbinary import (
+    _CLAUDE_AGENT_SDK_TIMEOUT_ENV_VAR,
+    ensure_claude_code_acp_setup,
+)
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SDK_TIMEOUT_MS = 30 * 60 * 1000
 
 
 class ClaudeCode(ACPAgent):
@@ -37,14 +42,18 @@ class ClaudeCode(ACPAgent):
         sonnet_model: str | Model | None = None,
         haiku_model: str | Model | None = None,
         subagent_model: str | Model | None = None,
+        sdk_timeout_ms: int | None = _DEFAULT_SDK_TIMEOUT_MS,
         **kwargs: Unpack[ACPAgentParams],
     ) -> None:
+        if sdk_timeout_ms is not None and sdk_timeout_ms <= 0:
+            raise ValueError("sdk_timeout_ms must be positive")
         self._disallowed_tools = list(disallowed_tools or [])
         self._resolved_skills = read_skills(skills) if skills else None
         self._opus_model: str | Model | None = opus_model
         self._sonnet_model: str | Model | None = sonnet_model
         self._haiku_model: str | Model | None = haiku_model
         self._subagent_model: str | Model | None = subagent_model
+        self._sdk_timeout_ms = sdk_timeout_ms
         super().__init__(**kwargs)
 
     def _build_model_map(self) -> dict[str, str | Model]:
@@ -118,6 +127,10 @@ class ClaudeCode(ACPAgent):
                 "IS_SANDBOX": "1",
                 "PATH": f"{node_dir}:/usr/local/bin:/usr/bin:/bin",
             } | self.env
+            if self._sdk_timeout_ms is not None:
+                agent_env[_CLAUDE_AGENT_SDK_TIMEOUT_ENV_VAR] = str(
+                    self._sdk_timeout_ms
+                )
 
             # System prompt via env (the ACP adapter will forward to CC)
             resolved_prompt = self._resolve_system_prompt(state)
@@ -165,6 +178,7 @@ def interactive_claude_code(
     sonnet_model: str | Model | None = None,
     haiku_model: str | Model | None = None,
     subagent_model: str | Model | None = None,
+    sdk_timeout_ms: int | None = _DEFAULT_SDK_TIMEOUT_MS,
     # Forwarded to ACPAgent
     **kwargs: Unpack[ACPAgentParams],
 ) -> ACPAgent:
@@ -180,6 +194,8 @@ def interactive_claude_code(
         sonnet_model: Model for sonnet calls.
         haiku_model: Model for haiku / background calls.
         subagent_model: Model for subagents.
+        sdk_timeout_ms: Override the Claude SDK per-request timeout in
+            milliseconds for the ACP adapter.
         **kwargs: See :class:`ACPAgentParams` for all base options.
     """
     return ClaudeCode(
@@ -189,5 +205,6 @@ def interactive_claude_code(
         sonnet_model=sonnet_model,
         haiku_model=haiku_model,
         subagent_model=subagent_model,
+        sdk_timeout_ms=sdk_timeout_ms,
         **kwargs,
     )
