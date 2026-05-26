@@ -12,15 +12,15 @@ requires-python = ">=3.10"
 license = { text = "MIT License" }
 dependencies = [
     "httpx",
-    "inspect_ai>=0.3.185",
+    "inspect_ai>=0.3.214",
     "nest_asyncio",
     "platformdirs",
-    "pydantic>=2.11.4",
+    "pydantic>=2.13.0",
     "pyyaml",
     "sniffio",
     "anyio",
     "typing_extensions>=4.9.0",
-    "agent-client-protocol",
+    "agent-client-protocol>=0.9.0,<0.10",
 ]
 
 [project.urls]

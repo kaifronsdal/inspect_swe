@@ -219,6 +219,10 @@ def codex_cli(
             # build toml config
             toml_config: dict[str, Any] = {}
 
+            # disable codex analytics (both the chatgpt.com analytics-events
+            # sink and the always-on Statsig OTel metrics to ab.chatgpt.com)
+            toml_config["analytics"] = {"enabled": False}
+
             # register mcp servers (combine static configs with bridged tools)
             all_mcp_servers = list(mcp_servers or []) + bridge.mcp_server_configs
             if all_mcp_servers:
@@ -229,20 +233,20 @@ def codex_cli(
                         )
                     )
 
-            # model provider if we are in centaur mode
-            if centaur:
-                toml_config["preferred_auth_method"] = "apikey"
-                toml_config["model_provider"] = "openai-proxy"
-                toml_config["model_providers.openai-proxy"] = {
-                    "name": "OpenAI Proxy",
-                    "base_url": f"http://localhost:{bridge.port}/v1",
-                    "env_key": "OPENAI_API_KEY",
-                    "wire_api": "responses",
-                }
+            # model provider (use a custom provider name so we can set
+            # stream_idle_timeout_ms -- built-in providers can't be overridden)
+            toml_config["preferred_auth_method"] = "apikey"
+            toml_config["model_provider"] = "openai-proxy"
+            toml_config["model_providers.openai-proxy"] = {
+                "name": "OpenAI Proxy",
+                "base_url": f"http://localhost:{bridge.port}/v1",
+                "env_key": "OPENAI_API_KEY",
+                "wire_api": "responses",
+                "stream_idle_timeout_ms": 3_600_000,
+            }
 
-            # write toml config if we have it
-            if len(toml_config) > 0:
-                await sbox.write_file(await codex_config_toml(), to_toml(toml_config))
+            # write toml config
+            await sbox.write_file(await codex_config_toml(), to_toml(toml_config))
 
             # setup agent env
             agent_env = {

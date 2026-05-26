@@ -112,12 +112,15 @@ class CodexCli(ACPAgent):
             toml_config: dict[str, Any] = {
                 "model": default_model,
                 "preferred_auth_method": "apikey",
+                "approval_policy": "never",
+                "sandbox_mode": "danger-full-access",
                 "model_provider": "openai-proxy",
                 "model_providers.openai-proxy": {
                     "name": "OpenAI Proxy",
                     "base_url": bridge_url,
                     "env_key": "OPENAI_API_KEY",
                     "wire_api": "responses",
+                    "stream_idle_timeout_ms": 3_600_000,
                 },
             }
             toml_config.update(self._config_overrides)

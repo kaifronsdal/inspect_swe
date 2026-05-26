@@ -24,11 +24,17 @@ def test_codex_cli_skills() -> None:
 @skip_if_no_google
 @skip_if_no_docker
 def test_gemini_cli_skills() -> None:
-    check_skills("gemini_cli", "google/gemini-2.5-pro")
+    check_skills("gemini_cli", "google/gemini-3.1-pro-preview")
+
+
+@skip_if_no_anthropic
+@skip_if_no_docker
+def test_opencode_skills() -> None:
+    check_skills("opencode", "anthropic/claude-sonnet-4-5")
 
 
 def check_skills(
-    agent: Literal["claude_code", "codex_cli", "gemini_cli"], model: str
+    agent: Literal["claude_code", "codex_cli", "gemini_cli", "opencode"], model: str
 ) -> None:
     log = run_example("skills", agent, model)[0]
     assert log.status == "success"

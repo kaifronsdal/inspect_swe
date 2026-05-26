@@ -27,15 +27,16 @@ from inspect_swe._util.messages import build_user_prompt
 from inspect_swe._util.path import join_path
 from inspect_swe._util.trace import trace
 
-from .agentbinary import ensure_gemini_cli_setup
+from .agentbinary import ensure_opencode_setup
 
 
 @agent
-def gemini_cli(
-    name: str = "Gemini CLI",
+def opencode(
+    name: str = "OpenCode",
     description: str = dedent("""
-       Autonomous coding agent capable of writing, testing, debugging,
-       and iterating on code across multiple languages.
+       Open-source autonomous coding agent for the terminal, capable
+       of writing, testing, debugging, and iterating on code across
+       multiple languages.
     """),
     system_prompt: str | None = None,
     skills: Sequence[str | Path | Skill] | None = None,
@@ -45,7 +46,7 @@ def gemini_cli(
     attempts: int | AgentAttempts = 1,
     model: str | None = None,
     model_aliases: dict[str, str | Model] | None = None,
-    gemini_model: str = "gemini-2.5-pro",
+    opencode_model: str = "anthropic/claude-sonnet-4-5",
     filter: GenerateFilter | None = None,
     retry_refusals: int | None = None,
     cwd: str | None = None,
@@ -54,9 +55,9 @@ def gemini_cli(
     sandbox: str | None = None,
     version: Literal["auto", "sandbox", "stable", "latest"] | str = "auto",
 ) -> Agent:
-    """Gemini CLI agent.
+    """OpenCode agent.
 
-    Agent that uses Google [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+    Agent that uses [OpenCode](https://github.com/anomalyco/opencode)
     running in a sandbox with Inspect model bridging.
 
     Use the `attempts` option to enable additional submissions if the initial
@@ -69,22 +70,23 @@ def gemini_cli(
         skills: Additional [skills](https://inspect.aisi.org.uk/tools-standard.html#sec-skill) to make available to the agent.
         mcp_servers: MCP servers to make available to the agent
         bridged_tools: Host-side Inspect tools to expose to the agent via MCP
-        centaur: Run in 'centaur' mode, which makes Gemini CLI available to an Inspect `human_cli()` agent rather than running it unattended.
+        centaur: Run in 'centaur' mode, which makes OpenCode available to an Inspect `human_cli()` agent rather than running it unattended.
         attempts: Configure agent to make multiple attempts
         model: Model name to use for inspect bridge (defaults to main model for task)
         model_aliases: Optional mapping of model names to Model instances or model name strings.
             Allows using custom Model implementations (e.g., wrapped Agents) instead of standard models.
             When a model name in the mapping is referenced, the corresponding Model/string is used.
-        gemini_model: Gemini model name to pass to CLI. This bypasses the auto-router.
-            Use "gemini-2.5-pro" (default) or "gemini-2.5-flash". The actual model
-            calls still go through the inspect bridge, but this disables the router.
+        opencode_model: OpenCode model identifier to pass to the CLI in the form
+            `provider/model` (default: `"anthropic/claude-sonnet-4-5"`). The actual model
+            calls still go through the Inspect bridge; this just selects which provider
+            client OpenCode uses to format the request.
         filter: Filter for intercepting bridged model requests
         retry_refusals: Should refusals be retried? (pass number of times to retry)
-        cwd: Working directory to run gemini cli within
-        env: Environment variables to set for gemini cli
-        user: User to execute gemini cli with
+        cwd: Working directory to run opencode within
+        env: Environment variables to set for opencode
+        user: User to execute opencode with
         sandbox: Optional sandbox environment name
-        version: Version of gemini cli to use. One of:
+        version: Version of opencode to use. One of:
             - "auto": Use any available version in sandbox, otherwise download latest
             - "sandbox": Use sandbox version (raises RuntimeError if not available)
             - "stable"/"latest": Download and use the latest version
@@ -103,9 +105,16 @@ def gemini_cli(
     # resolve attempts
     attempts = AgentAttempts(attempts) if isinstance(attempts, int) else attempts
 
+    # determine which provider client opencode will use, so we know which
+    # provider entry's baseURL to override in the config (the bridge intercepts
+    # the request regardless of which provider protocol opencode picks).
+    provider_id = (
+        opencode_model.split("/", 1)[0] if "/" in opencode_model else "anthropic"
+    )
+
     async def execute(state: AgentState) -> AgentState:
         # determine port (use new port for each execution of agent on sample)
-        MODEL_PORT = "gemini_cli_model_port"
+        MODEL_PORT = "opencode_model_port"
         port = store().get(MODEL_PORT, 3000) + 1
         store().set(MODEL_PORT, port)
 
@@ -124,33 +133,54 @@ def gemini_cli(
 
             # install skills
             if resolved_skills is not None:
-                GEMINI_SKILLS = ".gemini/skills"
+                OPENCODE_SKILLS = ".opencode/skills"
                 skills_dir = (
-                    join_path(cwd, GEMINI_SKILLS) if cwd is not None else GEMINI_SKILLS
+                    join_path(cwd, OPENCODE_SKILLS)
+                    if cwd is not None
+                    else OPENCODE_SKILLS
                 )
                 await install_skills(resolved_skills, sbox, user, skills_dir)
 
-            # install node and gemini-cli in sandbox
-            gemini_binary, node_binary = await ensure_gemini_cli_setup(
+            # install node and opencode in sandbox
+            opencode_binary, node_binary = await ensure_opencode_setup(
                 sbox, version, user
             )
 
-            # mcp servers
+            # combine static mcp configs with bridged tools' mcp servers
             all_mcp_servers = list(mcp_servers or []) + list(bridge.mcp_server_configs)
 
             # detect sandbox home directory
             home_result = await sbox.exec(["sh", "-c", "echo $HOME"], user=user)
             sandbox_home = home_result.stdout.strip() or "/root"
 
-            # write settings.json: disable Clearcut usage-statistics telemetry
-            # (on by default; only disable is via this settings key — env
-            # vars / DO_NOT_TRACK are not honoured) and register MCP servers
-            settings_json = build_gemini_settings(all_mcp_servers)
-            gemini_settings_dir = f"{sandbox_home}/.gemini"
-            await sbox.exec(["mkdir", "-p", gemini_settings_dir], user=user)
-            await sbox.write_file(f"{gemini_settings_dir}/settings.json", settings_json)
+            # write opencode config to redirect provider baseURL to the bridge
+            # and (optionally) configure mcp servers.
+            #
+            # The bridge's model-proxy server registers OpenAI-compatible
+            # routes (/v1/responses, /v1/chat/completions), the Anthropic
+            # Messages route (/v1/messages), and Gemini routes
+            # (/v1beta/models/*, /models/*). The AI SDK provider clients
+            # append the API-relative path (e.g. "/messages",
+            # "/chat/completions") to the configured baseURL, so we must
+            # include "/v1" in the baseURL we hand to opencode.
+            bridge_url = f"http://localhost:{bridge.port}"
+            provider_base_url = f"{bridge_url}/v1"
+            opencode_config: dict[str, Any] = {
+                "$schema": "https://opencode.ai/config.json",
+                "provider": {
+                    provider_id: {"options": {"baseURL": provider_base_url}},
+                },
+            }
+            if all_mcp_servers:
+                opencode_config["mcp"] = resolve_mcp_servers(all_mcp_servers)
 
-            # build system prompt
+            opencode_config_dir = f"{sandbox_home}/.config/opencode"
+            opencode_config_path = f"{opencode_config_dir}/opencode.json"
+            await sbox.exec(["mkdir", "-p", opencode_config_dir], user=user)
+            await sbox.write_file(opencode_config_path, json.dumps(opencode_config))
+
+            # build system prompt (opencode run takes a single positional message
+            # and has no separate --system-prompt flag, so we prepend)
             system_messages = [
                 m.text for m in state.messages if isinstance(m, ChatMessageSystem)
             ]
@@ -159,55 +189,50 @@ def gemini_cli(
 
             prompt, has_assistant_response = build_user_prompt(state.messages)
 
-            # Prepend system prompt to user prompt if provided
-            # (gemini-cli doesn't have a separate --system-prompt flag)
             if system_messages:
                 combined_system = "\n\n".join(system_messages)
                 prompt = f"{combined_system}\n\n{prompt}"
 
-            # build base command
-            # The gemini binary from npm install is a shell script that invokes node
+            # base command
             cmd = [
-                gemini_binary,
+                opencode_binary,
+                "run",
                 "--model",
-                gemini_model,  # Specify model to bypass auto-router
-                "--output-format",
-                "text",  # Text output format
+                opencode_model,
+                "--format",
+                "json",
             ]
 
-            # Add --yolo only for non-centaur mode (let user approve actions in centaur)
+            # add auto-approve flag only for non-centaur mode
             if centaur is False:
-                cmd.append("--yolo")
+                cmd.append("--dangerously-skip-permissions")
 
-            # Configure MCP server names if provided
-            # (all_mcp_servers defined earlier when writing settings.json)
-            for server in all_mcp_servers:
-                cmd.extend(["--allowed-mcp-server-names", server.name])
-
-            # setup agent env (add node to PATH so the gemini shell script can find it)
-            #
-            # GEMINI_CLI_TRUST_WORKSPACE: gemini-cli's settings schema defaults
-            # security.folderTrust.enabled to true; with no trustedFolders.json
-            # entry for the sandbox cwd, MCP discovery is silently skipped. This
-            # env var short-circuits the trust check (core/utils/trust.ts).
+            # setup agent env (add node to PATH so the opencode shell script can find it)
             node_dir = str(Path(node_binary).parent)
             agent_env = {
-                "GOOGLE_GEMINI_BASE_URL": f"http://localhost:{bridge.port}",
-                "GEMINI_API_KEY": "api-key",
-                "GEMINI_CLI_TRUST_WORKSPACE": "true",
+                # belt-and-braces: set per-provider base URL env vars in addition
+                # to the config file. Different opencode provider clients honor
+                # different env conventions; the config file is authoritative
+                # but env vars don't hurt. The bridge mounts API-specific routes
+                # under /v1, so anthropic/openai callers that append "/messages"
+                # or "/chat/completions" land on the right handler.
+                "ANTHROPIC_BASE_URL": f"{bridge_url}/v1",
+                "OPENAI_BASE_URL": f"{bridge_url}/v1",
+                "ANTHROPIC_API_KEY": "sk-none",
+                "OPENAI_API_KEY": "sk-none",
+                "OPENCODE_CONFIG": opencode_config_path,
                 "PATH": f"{node_dir}:/usr/local/bin:/usr/bin:/bin",
-                "HOME": sandbox_home,  # Use detected sandbox home for config + npm cache
+                "HOME": sandbox_home,
             } | (env or {})
 
             if centaur:
-                await _run_gemini_cli_centaur(
+                await _run_opencode_centaur(
                     options=centaur,
-                    gemini_cmd=cmd,
+                    opencode_cmd=cmd,
                     agent_env=agent_env,
                     state=state,
                 )
             else:
-                # execute the agent (track debug output)
                 debug_output: list[str] = []
                 agent_prompt = prompt
                 attempt_count = 0
@@ -215,9 +240,10 @@ def gemini_cli(
                 while True:
                     agent_cmd = cmd.copy()
 
-                    # resume previous conversation
+                    # continue previous conversation between attempts (or when
+                    # the inbound state already carries an assistant turn)
                     if has_assistant_response or attempt_count > 0:
-                        agent_cmd.extend(["--resume", "latest"])
+                        agent_cmd.append("--continue")
 
                     # add prompt as positional argument at the end
                     agent_cmd.append(agent_prompt)
@@ -235,31 +261,25 @@ def gemini_cli(
                         stream=False,
                     )
 
-                    # track debug output
                     debug_output.append(result.stdout)
                     debug_output.append(result.stderr)
 
-                    # raise for error
                     if not result.success:
-                        cli_error_msg = _clean_gemini_error(
+                        cli_error_msg = _clean_opencode_error(
                             result.stdout, result.stderr
                         )
                         raise RuntimeError(
-                            f"Error executing gemini cli agent {result.returncode}: {cli_error_msg}"
+                            f"Error executing opencode agent {result.returncode}: {cli_error_msg}"
                         )
 
-                    # exit if we are at max_attempts
                     attempt_count += 1
                     if attempt_count >= attempts.attempts:
                         break
 
-                    # score and check for success
                     answer_scores = await score(bridge.state)
-                    # break if we score 'correct'
                     if attempts.score_value(answer_scores[0].value) == 1.0:
                         break
 
-                    # update prompt for retry
                     if callable(attempts.incorrect_message):
                         if not is_callable_coroutine(attempts.incorrect_message):
                             raise ValueError(
@@ -271,8 +291,7 @@ def gemini_cli(
                     else:
                         agent_prompt = attempts.incorrect_message
 
-                # trace debug output
-                debug_output.insert(0, "Gemini CLI Debug Output:")
+                debug_output.insert(0, "OpenCode Debug Output:")
                 trace("\n".join(debug_output))
 
         return bridge.state
@@ -280,64 +299,70 @@ def gemini_cli(
     return agent_with(execute, name=name, description=description)
 
 
-def build_gemini_settings(mcp_servers: Sequence[MCPServerConfig]) -> str:
-    """Build Gemini CLI settings.json content (privacy + MCP server configs)."""
-    settings: dict[str, Any] = {
-        "privacy": {"usageStatisticsEnabled": False},
-    }
-    if mcp_servers:
-        mcp_servers_config: dict[str, Any] = {}
-        for server in mcp_servers:
-            config = server.model_dump(
-                exclude={"name", "tools", "type"}, exclude_none=True
-            )
-            # For HTTP transport, Gemini CLI uses 'httpUrl' field
-            if isinstance(server, MCPServerConfigHTTP) and "url" in config:
-                config["httpUrl"] = config.pop("url")
-            if "cwd" in config and not isinstance(config["cwd"], str):
-                config["cwd"] = str(config["cwd"])
-            mcp_servers_config[server.name] = config
-        settings["mcpServers"] = mcp_servers_config
-    return json.dumps(settings, indent=2)
+def resolve_mcp_servers(
+    mcp_servers: Sequence[MCPServerConfig],
+) -> dict[str, dict[str, Any]]:
+    """Build OpenCode `mcp` config block from MCP server configs.
 
-
-def _clean_gemini_error(stdout: str, stderr: str) -> str:
-    """Clean up Gemini CLI error output by removing noise.
-
-    The Gemini CLI output can include embedded <think> tags (reasoning content
-    preserved by the bridge) that clutter error messages. This function strips
-    them out to make errors readable.
+    OpenCode expects entries keyed by server name with either:
+      - {"type": "local", "command": [...], "environment": {...}}
+      - {"type": "remote", "url": "...", "headers": {...}}
     """
-    combined = f"{stdout}\n{stderr}"
+    out: dict[str, dict[str, Any]] = {}
+    for server in mcp_servers:
+        config = server.model_dump(exclude={"name", "tools", "type"}, exclude_none=True)
+        entry: dict[str, Any] = {"enabled": True}
+        if isinstance(server, MCPServerConfigHTTP):
+            entry["type"] = "remote"
+            if "url" in config:
+                entry["url"] = config.pop("url")
+            if "headers" in config:
+                entry["headers"] = config.pop("headers")
+        else:
+            entry["type"] = "local"
+            # opencode expects the command as a single array including args
+            command = config.pop("command", None)
+            args = config.pop("args", None)
+            if command is None:
+                raise ValueError(f"Local MCP server {server.name!r} has no command")
+            cmd_list = [command] if isinstance(command, str) else list(command)
+            if args:
+                cmd_list = cmd_list + list(args)
+            entry["command"] = cmd_list
+            env_block = config.pop("env", None)
+            if env_block:
+                entry["environment"] = env_block
+        out[server.name] = entry
+    return out
 
-    cleaned_lines = [
-        line for line in combined.split("\n") if not line.strip().startswith("<think")
-    ]
 
-    cleaned = "\n".join(cleaned_lines).strip()
-
+def _clean_opencode_error(stdout: str, stderr: str) -> str:
+    """Trim OpenCode CLI output to a manageable size for error messages."""
+    combined = f"{stdout}\n{stderr}".strip()
     max_len = 2000
-    if len(cleaned) > max_len:
-        cleaned = cleaned[:max_len] + "... (truncated)"
+    if len(combined) > max_len:
+        combined = combined[:max_len] + "... (truncated)"
+    return combined if combined else "Unknown error (no output)"
 
-    return cleaned if cleaned else "Unknown error (no output)"
 
-
-async def _run_gemini_cli_centaur(
+async def _run_opencode_centaur(
     options: CentaurOptions,
-    gemini_cmd: list[str],
+    opencode_cmd: list[str],
     agent_env: dict[str, str],
     state: AgentState,
 ) -> None:
-    instructions = "Gemini CLI:\n\n - You may also use Gemini CLI via the 'gemini' command.\n - Use 'gemini --resume latest' if you need to resume a previous gemini session."
+    instructions = (
+        "OpenCode:\n\n"
+        " - You may also use OpenCode via the 'opencode' command.\n"
+        " - Use 'opencode run --continue' if you need to resume a previous opencode session."
+    )
 
-    # build .bashrc content - only export vars needed for the gemini alias,
+    # build .bashrc content - only export vars needed for the opencode alias,
     # not HOME which would break human_cli (PATH is needed for node)
     centaur_env = {k: v for k, v in agent_env.items() if k != "HOME"}
     agent_env_vars = [f'export {k}="{v}"' for k, v in centaur_env.items()]
-    alias_cmd = shlex.join(gemini_cmd)
-    alias_cmd = "alias gemini='" + alias_cmd.replace("'", "'\\''") + "'"
+    alias_cmd = shlex.join(opencode_cmd)
+    alias_cmd = "alias opencode='" + alias_cmd.replace("'", "'\\''") + "'"
     bashrc = "\n".join(agent_env_vars + ["", alias_cmd])
 
-    # run the human cli
     await run_centaur(options, instructions, bashrc, state)

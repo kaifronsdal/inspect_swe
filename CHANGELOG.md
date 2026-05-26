@@ -1,3 +1,41 @@
+## 0.2.53 (13 May 2026)
+
+- Pin `agent-client-protocol>=0.9.0,<0.10` until [init ordering bug](https://github.com/agentclientprotocol/python-sdk/issues/97) is fixed.
+
+## 0.2.52 (09 May 2026)
+
+- OpenCode: New agent backend wrapping [OpenCode](https://github.com/anomalyco/opencode).
+- Codex CLI: Disable telemetry by default.
+- Gemini CLI: Disable telemetry by default.
+
+## 0.2.51 (07 May 2026)
+
+- Gemini CLI: Fix MCP registration via GEMINI_CLI_TRUST_WORKSPACE.
+- Mini SWE Agent: Ensure that pip is available before attempting installation.
+
+## 0.2.50 (29 April 2026)
+
+- Codex CLI: Run ACP mode with approval_policy: never and sandbox_mode: danger_full_access
+- Codex CLI: Fix for MCP tool calling (bump to Inspect v0.3.214 which has the fix).
+
+## 0.2.48 (26 April 2026)
+
+- Update download location for Claude Code binaries.
+
+## 0.2.47 (13 April 2026)
+
+- Codex CLI: Set 60 minute timeout for OpenAI streaming requests (default was 5 minutes).
+- Gemini CLI: Use `gemini-3.1-pro-preview` as model for tests.
+- Claude Code: Always use `--resume` for re-attaching to sessions (`--continue` sometimes drops history).
+
+## 0.2.46 (26 March 2026)
+
+- Update to latest ACP types.
+
+## 0.2.45 (20 March 2026)
+
+- ACP protocol improvements.
+
 ## 0.2.44 (18 March 2026)
 
 - Claude Code: Retry uncaught errors (unexpected crashes of scaffold) up to 3 times by default.
